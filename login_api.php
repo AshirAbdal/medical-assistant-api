@@ -17,7 +17,6 @@ $response = [
     "message" => "Invalid credentials"
 ];
 
-
 // Check if the request method is POST
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     $response = [
@@ -35,6 +34,23 @@ if (isset($data['email']) && isset($data['password'])) {
     
     // Validate credentials
     if ($email === $validEmail && $password === $validPassword) {
+        // Generate a unique session ID
+        $sessionId = session_create_id();
+        
+        // Generate a JWT-like token (in a real app, use a proper JWT library)
+        $issuedAt = time();
+        $expirationTime = $issuedAt + 3600; // Token valid for 1 hour
+        
+        $payload = [
+            'iat' => $issuedAt,
+            'exp' => $expirationTime,
+            'user_id' => 1,
+            'email' => $email
+        ];
+        
+        // Simple token generation (not secure for production)
+        $token = base64_encode(json_encode($payload));
+        
         $response = [
             "success" => true,
             "message" => "Login successful",
@@ -43,8 +59,14 @@ if (isset($data['email']) && isset($data['password'])) {
                 "email" => $email,
                 "name" => "Test User",
                 "role" => "doctor"
-            ]
+            ],
+            "token" => $token,
+            "session_id" => $sessionId,
+            "expires_at" => $expirationTime
         ];
+        
+        // In a real application, you would store the session in a database
+        // session_id => user_id, expiration_time, status, etc.
     }
 }
 
