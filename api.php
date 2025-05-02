@@ -200,23 +200,43 @@ class ApiHandler {
     }
 }
 
-// Extract endpoint from GET parameter or URL path
+// Enhanced endpoint extraction - Method 1: Query parameter (?url=)
 $endpoint = isset($_GET['url']) ? trim($_GET['url'], '/') : '';
 
-// If no endpoint was found in $_GET, try to extract it from the request URI
-if (empty($endpoint)) {
+// Method 2: PATH_INFO for cleaner URLs
+if (empty($endpoint) && isset($_SERVER['PATH_INFO'])) {
+    $endpoint = trim($_SERVER['PATH_INFO'], '/');
+}
+
+// Method 3: Extract from REQUEST_URI for servers not providing PATH_INFO
+if (empty($endpoint) && isset($_SERVER['REQUEST_URI'])) {
     $request_uri = $_SERVER['REQUEST_URI'];
     $base_path = '/my_patients_api/'; // Adjust this to match your base path
+    
     if (strpos($request_uri, $base_path) !== false) {
         $path = substr($request_uri, strpos($request_uri, $base_path) + strlen($base_path));
         $endpoint = trim($path, '/');
     }
 }
 
-// Remove query parameters if present
+// Method 4: If your server uses REDIRECT_URL (common in some Apache setups)
+if (empty($endpoint) && isset($_SERVER['REDIRECT_URL'])) {
+    $redirect_url = $_SERVER['REDIRECT_URL'];
+    $base_path = '/my_patients_api/';
+    
+    if (strpos($redirect_url, $base_path) !== false) {
+        $path = substr($redirect_url, strpos($redirect_url, $base_path) + strlen($base_path));
+        $endpoint = trim($path, '/');
+    }
+}
+
+// Remove query parameters if present in the extracted endpoint
 if (strpos($endpoint, '?') !== false) {
     $endpoint = substr($endpoint, 0, strpos($endpoint, '?'));
 }
+
+// Log for debugging (comment out in production)
+error_log("Extracted Endpoint: " . $endpoint);
 
 // Instantiate API class and process request
 $api = new ApiHandler($endpoint);
