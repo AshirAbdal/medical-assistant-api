@@ -79,8 +79,8 @@ class ApiHandler {
         $password = $input['password'];
 
         // For testing: valid test credentials (in production, this would check a database)
-        $validEmail = "test@test.com";
-        $validPassword = "123456";
+        $validEmail = "test@gmail.com";
+        $validPassword = "Ravee123@#";
 
         if ($email === $validEmail && $password === $validPassword) {
             // Generate a unique session ID
