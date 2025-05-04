@@ -1,9 +1,14 @@
-# Enable URL rewriting
+# Update .htaccess file to handle clean URLs without query parameters
 RewriteEngine On
 
 # If the requested filename exists as a file or directory, serve it directly
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 
-# Otherwise, route all requests to api.php
-RewriteRule ^(.*)$ api.php [QSA,L]
+# Block requests with query parameters (?, &, =)
+RewriteCond %{QUERY_STRING} .+ [OR]
+RewriteCond %{REQUEST_URI} [\?\&\=]
+RewriteRule ^ - [F,L]
+
+# Route clean URLs to api.php
+RewriteRule ^(.*)$ api.php [L]
