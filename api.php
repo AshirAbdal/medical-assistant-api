@@ -1,7 +1,13 @@
 <?php
-header("Access-Control-Allow-Origin: *"); // Allow any origin
-header("Access-Control-Allow-Methods: GET, POST, OPTIONS"); // Allowed HTTP methods
-header("Access-Control-Allow-Headers: Content-Type, Authorization"); // Allowed headers
+// Start session at the beginning of the script
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// CORS headers
+header("Access-Control-Allow-Origin: *");
+header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Session-ID"); // Added X-Session-ID
 header("Content-Type: application/json; charset=UTF-8");
 
 // Handle preflight (OPTIONS) requests automatically
@@ -52,11 +58,14 @@ class ApiHandler {
             case 'login':
                 $this->login();
                 break;
-            case 'validate_token':
-                $this->validateToken();
+            case 'validate_session':
+                $this->validateSession();
                 break;
             case 'logout':
                 $this->logout();
+                break;
+            case 'patients':
+                $this->getPatients();
                 break;
             default:
                 $this->notFound();
@@ -83,22 +92,14 @@ class ApiHandler {
         $validPassword = "Ravee123@#";
 
         if ($email === $validEmail && $password === $validPassword) {
-            // Generate a unique session ID
-            $sessionId = session_create_id();
+            // Store user data in PHP session
+            $_SESSION['user_id'] = 1;
+            $_SESSION['email'] = $email;
+            $_SESSION['name'] = 'Test User';
+            $_SESSION['role'] = 'doctor';
             
-            // Generate a JWT-like token
-            $issuedAt = time();
-            $expirationTime = $issuedAt + 3600; // Token valid for 1 hour
-            
-            $payload = [
-                'iat' => $issuedAt,
-                'exp' => $expirationTime,
-                'user_id' => 1,
-                'email' => $email
-            ];
-            
-            // Simple token generation (not secure for production)
-            $token = base64_encode(json_encode($payload));
+            // Get the PHP session ID
+            $sid = session_id();
             
             $this->sendSuccessResponse('Login successful', [
                 'user' => [
@@ -107,9 +108,7 @@ class ApiHandler {
                     'name' => 'Test User',
                     'role' => 'doctor'
                 ],
-                'token' => $token,
-                'session_id' => $sessionId,
-                'expires_at' => $expirationTime
+                'sid' => $sid
             ]);
         } else {
             $this->sendErrorResponse(401, 'Invalid credentials');
@@ -117,42 +116,111 @@ class ApiHandler {
     }
 
     /**
-     * Validates authentication token.
+     * Validates the session.
      */
-    private function validateToken() {
-        // Get authorization header
+    private function validateSession() {
+        // Get session ID from request header
         $headers = getallheaders();
-        $authHeader = isset($headers['Authorization']) ? $headers['Authorization'] : '';
+        $requestSessionId = isset($headers['X-Session-ID']) ? $headers['X-Session-ID'] : '';
         
-        // Check if token exists
-        if (empty($authHeader) || !preg_match('/Bearer\s(\S+)/', $authHeader, $matches)) {
-            $this->sendErrorResponse(401, 'No token provided');
+        // Check if session ID is valid
+        if (empty($requestSessionId)) {
+            $this->sendErrorResponse(401, 'No session ID provided');
             return;
         }
         
-        $token = $matches[1];
-        
-        // Decode token
-        try {
-            $payload = json_decode(base64_decode($token), true);
-            
-            // Check if token is expired
-            if (!isset($payload['exp']) || $payload['exp'] < time()) {
-                $this->sendErrorResponse(401, 'Token expired');
-                return;
-            }
-            
-            $this->sendSuccessResponse('Token is valid');
-        } catch (Exception $e) {
-            $this->sendErrorResponse(401, 'Invalid token');
+        // Compare with current session ID
+        if ($requestSessionId === session_id() && isset($_SESSION['user_id'])) {
+            $this->sendSuccessResponse('Session is valid', [
+                'user' => [
+                    'id' => $_SESSION['user_id'],
+                    'email' => $_SESSION['email'],
+                    'name' => $_SESSION['name'],
+                    'role' => $_SESSION['role']
+                ]
+            ]);
+        } else {
+            $this->sendErrorResponse(401, 'Invalid or expired session');
         }
+    }
+
+    /**
+     * Retrieves patient data for the authenticated user.
+     */
+    private function getPatients() {
+        // Check if this is a GET request
+        if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+            $this->sendErrorResponse(405, 'Method not allowed. Use GET for this endpoint.');
+            return;
+        }
+        
+        // Get session ID from request header
+        $headers = getallheaders();
+        $requestSessionId = isset($headers['X-Session-ID']) ? $headers['X-Session-ID'] : '';
+        
+        // Validate session
+        if (empty($requestSessionId) || $requestSessionId !== session_id() || !isset($_SESSION['user_id'])) {
+            $this->sendErrorResponse(401, 'Invalid or expired session');
+            return;
+        }
+        
+        // Return sample patient data (in production, this would come from a database)
+        $patients = [
+            [
+                'name' => 'John Doe',
+                'age' => 45,
+                'gender' => 'Male',
+                'id' => 'P1001',
+                'iconColor' => '#2196F3' // Blue color code
+            ],
+            [
+                'name' => 'Michael Johnson',
+                'age' => 68,
+                'gender' => 'Male',
+                'id' => 'P1003',
+                'iconColor' => '#2196F3'
+            ],
+            [
+                'name' => 'David Wilson',
+                'age' => 55,
+                'gender' => 'Male',
+                'id' => 'P1005',
+                'iconColor' => '#2196F3'
+            ]
+        ];
+        
+        // Sample appointments data
+        $appointments = [
+            [
+                'time' => '02:15 PM',
+                'name' => 'David Wilson',
+                'type' => 'Consultation',
+                'color' => '#2196F3' // Blue color code
+            ],
+            [
+                'time' => '09:30 AM',
+                'name' => 'John Doe',
+                'type' => 'Check-up',
+                'color' => '#4CAF50' // Green color code
+            ]
+        ];
+        
+        $this->sendSuccessResponse('Patients retrieved successfully', [
+            'patients' => $patients,
+            'appointments' => $appointments
+        ]);
     }
 
     /**
      * Handles logout requests.
      */
     private function logout() {
-        // In a real implementation, you would invalidate the token in a database
+        // Clear session data
+        session_unset();
+        
+        // Destroy the session
+        session_destroy();
+        
         $this->sendSuccessResponse('Logout successful');
     }
 
