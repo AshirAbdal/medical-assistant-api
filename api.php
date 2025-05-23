@@ -327,10 +327,14 @@ class ApiHandler {
             if (empty($doctorCategoryIds)) {
                 // If no categories, return only patients created by this doctor
                 $query = "
-                    SELECT p.*, c.name as category_name 
+                    SELECT DISTINCT p.*, 
+                           GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name,
+                           (SELECT category_id FROM patient_categories WHERE patient_id = p.id LIMIT 1) as category_id
                     FROM patients p
-                    LEFT JOIN categories c ON p.category_id = c.id
+                    LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                    LEFT JOIN categories c ON pc.category_id = c.id
                     WHERE p.created_by = ?
+                    GROUP BY p.id
                 ";
                 $params = [$doctorId];
             } else {
@@ -339,10 +343,18 @@ class ApiHandler {
                 
                 // Build query to get patients matching doctor's categories OR created by this doctor
                 $query = "
-                    SELECT p.*, c.name as category_name 
+                    SELECT DISTINCT p.*, 
+                           GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name,
+                           (SELECT category_id FROM patient_categories WHERE patient_id = p.id LIMIT 1) as category_id
                     FROM patients p
-                    LEFT JOIN categories c ON p.category_id = c.id
-                    WHERE (p.category_id IN ($categoryPlaceholders) OR p.created_by = ?)
+                    LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                    LEFT JOIN categories c ON pc.category_id = c.id
+                    WHERE p.id IN (
+                        SELECT DISTINCT patient_id 
+                        FROM patient_categories 
+                        WHERE category_id IN ($categoryPlaceholders)
+                    ) OR p.created_by = ?
+                    GROUP BY p.id
                 ";
                 
                 // Parameters for the query
@@ -352,8 +364,21 @@ class ApiHandler {
             // Filter by category_id if provided
             if (isset($_GET['category_id']) && $_GET['category_id']) {
                 $categoryId = (int)$_GET['category_id'];
-                $query .= " AND p.category_id = ?";
-                $params[] = $categoryId;
+                $query = "
+                    SELECT DISTINCT p.*, 
+                           GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name,
+                           (SELECT category_id FROM patient_categories WHERE patient_id = p.id LIMIT 1) as category_id
+                    FROM patients p
+                    LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                    LEFT JOIN categories c ON pc.category_id = c.id
+                    WHERE p.id IN (
+                        SELECT patient_id 
+                        FROM patient_categories 
+                        WHERE category_id = ?
+                    )
+                    GROUP BY p.id
+                ";
+                $params = [$categoryId];
             }
             
             $query .= " ORDER BY p.name";
@@ -394,10 +419,13 @@ class ApiHandler {
             $doctorId = $_SESSION['user_id'];
             
             $stmt = $this->pdo->prepare("
-                SELECT p.*, c.name as category_name 
+                SELECT p.*, 
+                       GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name
                 FROM patients p
-                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                LEFT JOIN categories c ON pc.category_id = c.id
                 WHERE p.id = ? AND p.created_by = ?
+                GROUP BY p.id
             ");
             $stmt->execute([$id, $doctorId]);
             $patient = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -432,14 +460,17 @@ class ApiHandler {
         $stmt = $this->pdo->prepare("
             SELECT a.id, a.appointment_date, a.appointment_time, a.type, a.status,
                    p.id as patient_id, p.name as patient_name, p.gender,
-                   c.id as category_id, c.name as category_name
+                   GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name,
+                   (SELECT category_id FROM patient_categories WHERE patient_id = p.id LIMIT 1) as category_id
             FROM appointments a
             INNER JOIN patients p ON a.patient_id = p.id
-            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+            LEFT JOIN categories c ON pc.category_id = c.id
             WHERE a.doctor_id = ? 
               AND a.status = 'scheduled'
               AND (a.appointment_date > CURDATE() 
                    OR (a.appointment_date = CURDATE() AND a.appointment_time >= CURTIME()))
+            GROUP BY a.id
             ORDER BY a.appointment_date, a.appointment_time
             LIMIT 5
         ");
@@ -479,18 +510,22 @@ class ApiHandler {
         }
         
         try {
+            // Start transaction
+            $this->pdo->beginTransaction();
+            
             // Get the next patient ID
             $stmt = $this->pdo->query("SELECT MAX(CAST(SUBSTRING(patient_id, 2) AS UNSIGNED)) as max_id FROM patients");
             $result = $stmt->fetch(PDO::FETCH_ASSOC);
             $nextId = ($result['max_id'] ?? 1000) + 1;
             $patientId = 'P' . $nextId;
             
+            // Insert patient (without category_id)
             $stmt = $this->pdo->prepare("
                 INSERT INTO patients (
                     patient_id, name, age, gender, email, phone, address, 
-                    medical_history, notes, category_id, created_by
+                    medical_history, notes, created_by
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
             ");
             
@@ -504,18 +539,32 @@ class ApiHandler {
                 $input['address'] ?? null,
                 $input['medical_history'] ?? null,
                 $input['notes'] ?? null,
-                $input['category_id'] ?? null,
                 $_SESSION['user_id']
             ]);
             
             $newPatientId = $this->pdo->lastInsertId();
             
+            // If category_id is provided, insert into patient_categories
+            if (isset($input['category_id']) && $input['category_id']) {
+                $stmt = $this->pdo->prepare("
+                    INSERT INTO patient_categories (patient_id, category_id)
+                    VALUES (?, ?)
+                ");
+                $stmt->execute([$newPatientId, $input['category_id']]);
+            }
+            
+            // Commit transaction
+            $this->pdo->commit();
+            
             // Get the created patient data
             $stmt = $this->pdo->prepare("
-                SELECT p.*, c.name as category_name 
+                SELECT p.*, 
+                       GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name
                 FROM patients p
-                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                LEFT JOIN categories c ON pc.category_id = c.id
                 WHERE p.id = ?
+                GROUP BY p.id
             ");
             $stmt->execute([$newPatientId]);
             $patient = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -524,6 +573,7 @@ class ApiHandler {
                 'patient' => $patient
             ]);
         } catch (PDOException $e) {
+            $this->pdo->rollBack();
             $this->sendErrorResponse(500, 'Database error: ' . $e->getMessage());
         }
     }
@@ -549,6 +599,9 @@ class ApiHandler {
         }
         
         try {
+            // Start transaction
+            $this->pdo->beginTransaction();
+            
             // Verify the patient belongs to this doctor
             $stmt = $this->pdo->prepare("SELECT * FROM patients WHERE id = ? AND created_by = ?");
             $stmt->execute([$id, $_SESSION['user_id']]);
@@ -565,7 +618,7 @@ class ApiHandler {
             
             $allowedFields = [
                 'name', 'age', 'gender', 'email', 'phone', 'address', 
-                'medical_history', 'notes', 'category_id'
+                'medical_history', 'notes'
             ];
             
             foreach ($allowedFields as $field) {
@@ -575,24 +628,43 @@ class ApiHandler {
                 }
             }
             
-            if (empty($updateFields)) {
-                $this->sendErrorResponse(400, 'No valid fields to update.');
-                return;
+            if (!empty($updateFields)) {
+                // Add patient ID to params
+                $params[] = $id;
+                
+                $query = "UPDATE patients SET " . implode(', ', $updateFields) . " WHERE id = ?";
+                $stmt = $this->pdo->prepare($query);
+                $stmt->execute($params);
             }
             
-            // Add patient ID to params
-            $params[] = $id;
+            // Handle category update separately
+            if (isset($input['category_id'])) {
+                // Delete existing categories
+                $stmt = $this->pdo->prepare("DELETE FROM patient_categories WHERE patient_id = ?");
+                $stmt->execute([$id]);
+                
+                // Add new category if provided
+                if ($input['category_id']) {
+                    $stmt = $this->pdo->prepare("
+                        INSERT INTO patient_categories (patient_id, category_id)
+                        VALUES (?, ?)
+                    ");
+                    $stmt->execute([$id, $input['category_id']]);
+                }
+            }
             
-            $query = "UPDATE patients SET " . implode(', ', $updateFields) . " WHERE id = ?";
-            $stmt = $this->pdo->prepare($query);
-            $stmt->execute($params);
+            // Commit transaction
+            $this->pdo->commit();
             
             // Get updated patient data
             $stmt = $this->pdo->prepare("
-                SELECT p.*, c.name as category_name 
+                SELECT p.*, 
+                       GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name
                 FROM patients p
-                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                LEFT JOIN categories c ON pc.category_id = c.id
                 WHERE p.id = ?
+                GROUP BY p.id
             ");
             $stmt->execute([$id]);
             $updatedPatient = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -601,6 +673,7 @@ class ApiHandler {
                 'patient' => $updatedPatient
             ]);
         } catch (PDOException $e) {
+            $this->pdo->rollBack();
             $this->sendErrorResponse(500, 'Database error: ' . $e->getMessage());
         }
     }
@@ -629,7 +702,7 @@ class ApiHandler {
                 return;
             }
             
-            // Delete the patient (appointments will be cascaded)
+            // Delete the patient (appointments and patient_categories will be cascaded)
             $stmt = $this->pdo->prepare("DELETE FROM patients WHERE id = ?");
             $stmt->execute([$id]);
             
@@ -658,10 +731,11 @@ class ApiHandler {
             $query = "
                 SELECT a.*, 
                        p.name as patient_name, p.patient_id as patient_code, p.gender,
-                       c.name as category_name
+                       GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name
                 FROM appointments a
                 INNER JOIN patients p ON a.patient_id = p.id
-                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                LEFT JOIN categories c ON pc.category_id = c.id
                 WHERE a.doctor_id = ?
             ";
             $params = [$doctorId];
@@ -677,7 +751,7 @@ class ApiHandler {
                 $params[] = $patientId;
             }
             
-            $query .= " ORDER BY a.appointment_date, a.appointment_time";
+            $query .= " GROUP BY a.id ORDER BY a.appointment_date, a.appointment_time";
             
             $stmt = $this->pdo->prepare($query);
             $stmt->execute($params);
@@ -723,11 +797,13 @@ class ApiHandler {
             $stmt = $this->pdo->prepare("
                 SELECT a.*, 
                        p.name as patient_name, p.patient_id as patient_code, p.gender,
-                       c.name as category_name
+                       GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name
                 FROM appointments a
                 INNER JOIN patients p ON a.patient_id = p.id
-                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                LEFT JOIN categories c ON pc.category_id = c.id
                 WHERE a.id = ? AND a.doctor_id = ?
+                GROUP BY a.id
             ");
             $stmt->execute([$id, $doctorId]);
             $appointment = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -812,11 +888,13 @@ class ApiHandler {
             $stmt = $this->pdo->prepare("
                 SELECT a.*, 
                        p.name as patient_name, p.patient_id as patient_code, p.gender,
-                       c.name as category_name
+                       GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name
                 FROM appointments a
                 INNER JOIN patients p ON a.patient_id = p.id
-                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                LEFT JOIN categories c ON pc.category_id = c.id
                 WHERE a.id = ?
+                GROUP BY a.id
             ");
             $stmt->execute([$newAppointmentId]);
             $appointment = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -918,11 +996,13 @@ class ApiHandler {
             $stmt = $this->pdo->prepare("
                 SELECT a.*, 
                        p.name as patient_name, p.patient_id as patient_code, p.gender,
-                       c.name as category_name
+                       GROUP_CONCAT(DISTINCT c.name ORDER BY c.name SEPARATOR ', ') as category_name
                 FROM appointments a
                 INNER JOIN patients p ON a.patient_id = p.id
-                LEFT JOIN categories c ON p.category_id = c.id
+                LEFT JOIN patient_categories pc ON p.id = pc.patient_id
+                LEFT JOIN categories c ON pc.category_id = c.id
                 WHERE a.id = ?
+                GROUP BY a.id
             ");
             $stmt->execute([$id]);
             $updatedAppointment = $stmt->fetch(PDO::FETCH_ASSOC);
