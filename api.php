@@ -79,138 +79,283 @@ class ApiHandler {
         }
     }
 
-    /**
-     * Routes the request to the appropriate method based on the endpoint.
-     */
-    public function processRequest() {
-        $method = $_SERVER['REQUEST_METHOD'];
-        
-        // Split the endpoint to extract resource and ID
-        $parts = explode('/', $this->endpoint);
-        $resource = $parts[0];
-        $id = isset($parts[1]) ? $parts[1] : null;
-        
-        switch ($resource) {
-            case 'login':
-                $this->login();
-                break;
-            case 'validate_session':
-                $this->validateSession();
-                break;
-            case 'logout':
-                $this->logout();
-                break;
-            case 'patients':
-                if ($method === 'GET') {
-                    if ($id) {
-                        $this->getPatientById($id);
-                    } else {
-                        $this->getPatients();
-                    }
-                } elseif ($method === 'POST') {
-                    $this->addPatient();
-                } elseif ($method === 'PUT') {
-                    $this->updatePatient($id);
-                } elseif ($method === 'DELETE') {
-                    $this->deletePatient($id);
-                }
-                break;
-            case 'categories':
-                if ($method === 'GET') {
-                    $this->getCategories();
-                }
-                break;
-            case 'appointments':
-                if ($method === 'GET') {
-                    if ($id) {
-                        $this->getAppointmentById($id);
-                    } else {
-                        $this->getAppointments();
-                    }
-                } elseif ($method === 'POST') {
-                    $this->addAppointment();
-                } elseif ($method === 'PUT') {
-                    $this->updateAppointment($id);
-                } elseif ($method === 'DELETE') {
-                    $this->deleteAppointment($id);
-                }
-                break;
-            default:
-                $this->notFound();
-                break;
-        }
+    // Add this method to check if the request is from mobile or web
+private function getRequestSource() {
+    $headers = getallheaders();
+    
+    // Check for custom header to identify the source
+    if (isset($headers['X-App-Type'])) {
+        return strtolower($headers['X-App-Type']); // 'mobile' or 'web'
     }
-
-    /**
-     * Handles login requests.
-     */
-    private function login() {
-        $input = json_decode(file_get_contents('php://input'), true);
-
-        if (!$input || !isset($input['email']) || !isset($input['password'])) {
-            $this->sendErrorResponse(400, 'Invalid input. Expecting email and password.');
-            return;
-        }
-
-        $email = $input['email'];
-        $password = $input['password'];
-
-        try {
-            // Get user by email
-            $stmt = $this->pdo->prepare("SELECT * FROM users WHERE email = ?");
-            $stmt->execute([$email]);
-            $user = $stmt->fetch(PDO::FETCH_ASSOC);
-
-            // For testing - direct string comparison 
-            // In production, you should use password_verify()
-            if ($user && $password === $user['password']) {
-                // Start a fresh session
-                if (session_status() === PHP_SESSION_ACTIVE) {
-                    session_regenerate_id(true);
-                }
-                
-                // Store user data in PHP session
-                $_SESSION['user_id'] = $user['id'];
-                $_SESSION['email'] = $user['email'];
-                $_SESSION['name'] = $user['name'];
-                $_SESSION['role'] = $user['role'];
-                
-                // Get the PHP session ID
-                $sid = session_id();
-                
-                // Debug session data
-                error_log("Login successful for user ID: " . $user['id']);
-                error_log("Session ID after login: " . $sid);
-                error_log("Session data: " . json_encode($_SESSION));
-                
-                // Force session data to be written
-                session_write_close();
-                session_id($sid);
-                session_start();
-                
-                // Get doctor categories
-                $categories = $this->getDoctorCategories($user['id']);
-                
-                $userData = [
-                    'id' => $user['id'],
-                    'email' => $user['email'],
-                    'name' => $user['name'],
-                    'role' => $user['role'],
-                    'categories' => $categories
-                ];
-                
-                $this->sendSuccessResponse('Login successful', [
-                    'user' => $userData,
-                    'sid' => $sid
-                ]);
-            } else {
-                $this->sendErrorResponse(401, 'Invalid credentials');
-            }
-        } catch (PDOException $e) {
-            $this->sendErrorResponse(500, 'Database error: ' . $e->getMessage());
+    
+    // Fallback: Check user agent
+    $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+    
+    // Basic mobile detection (you might want to use a more sophisticated library)
+    $mobileKeywords = ['Mobile', 'Android', 'iPhone', 'iPad', 'Windows Phone'];
+    foreach ($mobileKeywords as $keyword) {
+        if (strpos($userAgent, $keyword) !== false) {
+            return 'mobile';
         }
     }
     
+    return 'web';
+}
+
+    /**
+     * Routes the request to the appropriate method based on the endpoint.
+     */
+
+     // Add this method to your ApiHandler class to check permissions
+private function checkAccess($requiredAccess = 'mobile') {
+    if (!isset($_SESSION['role'])) {
+        $this->sendErrorResponse(401, 'Unauthorized. No role defined.');
+        return false;
+    }
+    
+    $userRole = $_SESSION['role'];
+    
+    // Define access levels for each role
+    $rolePermissions = [
+        'doctor' => ['mobile'], // Only mobile access
+        'admin' => ['mobile', 'web', 'all'], // All access
+        'doctor_admin' => ['mobile', 'web', 'all'] // All access
+    ];
+    
+    // Check if user's role has the required access
+    if (!isset($rolePermissions[$userRole])) {
+        $this->sendErrorResponse(403, 'Invalid role.');
+        return false;
+    }
+    
+    if ($requiredAccess === 'all' || in_array($requiredAccess, $rolePermissions[$userRole]) || in_array('all', $rolePermissions[$userRole])) {
+        return true;
+    }
+    
+    $this->sendErrorResponse(403, 'Access denied. You do not have permission to access this resource.');
+    return false;
+}
+
+  // Update your processRequest method to include access control
+public function processRequest() {
+    $method = $_SERVER['REQUEST_METHOD'];
+    
+    // Split the endpoint to extract resource and ID
+    $parts = explode('/', $this->endpoint);
+    $resource = $parts[0];
+    $id = isset($parts[1]) ? $parts[1] : null;
+    
+    // Determine request source
+    $requestSource = $this->getRequestSource();
+    
+    switch ($resource) {
+        case 'login':
+            $this->login();
+            break;
+        case 'validate_session':
+            $this->validateSession();
+            break;
+        case 'logout':
+            $this->logout();
+            break;
+        case 'patients':
+            // Check access based on role and request source
+            if (!$this->validateAuth()) return;
+            
+            $userRole = $_SESSION['role'] ?? '';
+            if ($userRole === 'doctor' && $requestSource === 'web') {
+                $this->sendErrorResponse(403, 'Doctors can only access patient data from mobile application.');
+                return;
+            }
+            
+            if ($method === 'GET') {
+                if ($id) {
+                    $this->getPatientById($id);
+                } else {
+                    $this->getPatients();
+                }
+            } elseif ($method === 'POST') {
+                $this->addPatient();
+            } elseif ($method === 'PUT') {
+                $this->updatePatient($id);
+            } elseif ($method === 'DELETE') {
+                $this->deletePatient($id);
+            }
+            break;
+        case 'categories':
+            if (!$this->validateAuth()) return;
+            
+            $userRole = $_SESSION['role'] ?? '';
+            if ($userRole === 'doctor' && $requestSource === 'web') {
+                $this->sendErrorResponse(403, 'Doctors can only access categories from mobile application.');
+                return;
+            }
+            
+            if ($method === 'GET') {
+                $this->getCategories();
+            }
+            break;
+        case 'appointments':
+            if (!$this->validateAuth()) return;
+            
+            $userRole = $_SESSION['role'] ?? '';
+            if ($userRole === 'doctor' && $requestSource === 'web') {
+                $this->sendErrorResponse(403, 'Doctors can only access appointments from mobile application.');
+                return;
+            }
+            
+            if ($method === 'GET') {
+                if ($id) {
+                    $this->getAppointmentById($id);
+                } else {
+                    $this->getAppointments();
+                }
+            } elseif ($method === 'POST') {
+                $this->addAppointment();
+            } elseif ($method === 'PUT') {
+                $this->updateAppointment($id);
+            } elseif ($method === 'DELETE') {
+                $this->deleteAppointment($id);
+            }
+            break;
+        case 'billing':
+            // Add billing endpoint with access control
+            if (!$this->validateAuth()) return;
+            
+            $userRole = $_SESSION['role'] ?? '';
+            if ($userRole === 'doctor' && $requestSource === 'web') {
+                $this->sendErrorResponse(403, 'Doctors can only access billing from mobile application.');
+                return;
+            }
+            
+            // Add your billing methods here
+            $this->sendSuccessResponse('Billing endpoint - implement your methods here');
+            break;
+        case 'admin':
+            // Admin-only endpoints
+            if (!$this->validateAuth()) return;
+            
+            $userRole = $_SESSION['role'] ?? '';
+            if ($userRole === 'doctor') {
+                $this->sendErrorResponse(403, 'Access denied. Admin privileges required.');
+                return;
+            }
+            
+            // Add your admin methods here
+            $this->sendSuccessResponse('Admin endpoint - implement your methods here');
+            break;
+        default:
+            $this->notFound();
+            break;
+    }
+}
+
+ // Update the login method to include role information in the response
+private function login() {
+    $input = json_decode(file_get_contents('php://input'), true);
+
+    if (!$input || !isset($input['email']) || !isset($input['password'])) {
+        $this->sendErrorResponse(400, 'Invalid input. Expecting email and password.');
+        return;
+    }
+
+    $email = $input['email'];
+    $password = $input['password'];
+
+    try {
+        // Get user by email
+        $stmt = $this->pdo->prepare("SELECT * FROM users WHERE email = ?");
+        $stmt->execute([$email]);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($user && $password === $user['password']) {
+            // Start a fresh session
+            if (session_status() === PHP_SESSION_ACTIVE) {
+                session_regenerate_id(true);
+            }
+            
+            // Store user data in PHP session
+            $_SESSION['user_id'] = $user['id'];
+            $_SESSION['email'] = $user['email'];
+            $_SESSION['name'] = $user['name'];
+            $_SESSION['role'] = $user['role'];
+            
+            // Get the PHP session ID
+            $sid = session_id();
+            
+            // Force session data to be written
+            session_write_close();
+            session_id($sid);
+            session_start();
+            
+            // Get doctor categories (only for doctor and doctor_admin roles)
+            $categories = [];
+            if (in_array($user['role'], ['doctor', 'doctor_admin'])) {
+                $categories = $this->getDoctorCategories($user['id']);
+            }
+            
+            $userData = [
+                'id' => $user['id'],
+                'email' => $user['email'],
+                'name' => $user['name'],
+                'role' => $user['role'],
+                'categories' => $categories,
+                'permissions' => $this->getRolePermissions($user['role'])
+            ];
+            
+            $this->sendSuccessResponse('Login successful', [
+                'user' => $userData,
+                'sid' => $sid
+            ]);
+        } else {
+            $this->sendErrorResponse(401, 'Invalid credentials');
+        }
+    } catch (PDOException $e) {
+        $this->sendErrorResponse(500, 'Database error: ' . $e->getMessage());
+    }
+}
+    
+
+    private function getRolePermissions($role) {
+    $permissions = [
+        'doctor' => [
+            'canAccessMobile' => true,
+            'canAccessWeb' => false,
+            'canViewPatients' => true,
+            'canAddPatients' => true,
+            'canEditPatients' => true,
+            'canDeletePatients' => true,
+            'canManageAppointments' => true,
+            'canViewBilling' => true,
+            'canAccessAdmin' => false
+        ],
+        'admin' => [
+            'canAccessMobile' => true,
+            'canAccessWeb' => true,
+            'canViewPatients' => true,
+            'canAddPatients' => true,
+            'canEditPatients' => true,
+            'canDeletePatients' => true,
+            'canManageAppointments' => true,
+            'canViewBilling' => true,
+            'canAccessAdmin' => true
+        ],
+        'doctor_admin' => [
+            'canAccessMobile' => true,
+            'canAccessWeb' => true,
+            'canViewPatients' => true,
+            'canAddPatients' => true,
+            'canEditPatients' => true,
+            'canDeletePatients' => true,
+            'canManageAppointments' => true,
+            'canViewBilling' => true,
+            'canAccessAdmin' => true
+        ]
+    ];
+    
+    return $permissions[$role] ?? [];
+}
+
     /**
      * Get categories assigned to a doctor
      */
